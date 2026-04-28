@@ -76,6 +76,22 @@ class Assistant(Agent):
             date_from: Only return emails on or after this ISO date, e.g. '2026-04-01'.
             date_to: Only return emails on or before this ISO date, e.g. '2026-04-30'.
         """
+        # Hard-validate that every value in `to` is an email address, not a name.
+        if to:
+            bad = [v for v in to if "@" not in v]
+            if bad:
+                raise ToolError(
+                    f"The 'to' filter requires email addresses, but you passed: {bad}. "
+                    "Call search_entities first to resolve each name to their email address, "
+                    "then retry search_emails with the resolved addresses."
+                )
+        # Same guard for sender.
+        if sender and "@" not in sender:
+            raise ToolError(
+                f"The 'sender' filter requires an email address, but you passed: {sender!r}. "
+                "Call search_entities first to resolve the name to an email address, "
+                "then retry search_emails with the resolved address."
+            )
         from tools.agent_tools import search_emails as _fn
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(
@@ -244,6 +260,18 @@ class Assistant(Agent):
             subject: Email subject line.
             body: Full plain-text email body.
         """
+        bad = [v for v in to if "@" not in v]
+        if bad:
+            raise ToolError(
+                f"The 'to' field requires email addresses, but you passed: {bad}. "
+                "Call search_entities first to resolve each name to their email address, "
+                "then retry send_email with the resolved addresses."
+            )
+        if not subject or not subject.strip():
+            raise ToolError("The 'subject' field must not be empty.")
+        if not body or not body.strip():
+            raise ToolError("The 'body' field must not be empty.")
+
         context.disallow_interruptions()
 
         def _send() -> str:
@@ -283,6 +311,11 @@ class Assistant(Agent):
         Args:
             session_id: The session ID returned by search_events, e.g. 'session_1745123456789'.
         """
+        if not session_id.startswith("session_"):
+            raise ToolError(
+                f"'{session_id}' is not a valid session ID. "
+                "Call search_events first and use the session_id value from those results."
+            )
         from tools.agent_tools import get_session_transcript as _fn
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, lambda: _fn(session_id))
