@@ -15,18 +15,18 @@ from livekit.agents import (
     RunContext,
     cli,
     function_tool,
-    inference,
     room_io,
+    inference,
 )
 from livekit.agents.llm import ToolError
-from livekit.plugins import silero
+from livekit.plugins import openai, silero
 
 logger = logging.getLogger("agent")
 
 # In Docker the vars come from env_file in compose; locally .env is a fallback.
 load_dotenv()
 
-AGENT_MODEL = "openai/gpt-5.3-chat-latest"
+AGENT_MODEL = "gpt-4o-mini"
 
 
 def _load_base_instructions() -> str:
@@ -37,12 +37,18 @@ def _load_base_instructions() -> str:
 class Assistant(Agent):
     def __init__(self, prior_context: str = "") -> None:
         base = _load_base_instructions()
+        user_email = os.environ.get("DEMO_USER_EMAIL", "me@demo.local")
+        user_section = (
+            "\n\n── USER INFORMATION ────────────────────────────────────────────\n"
+            f"The user's email address is: {user_email}\n"
+            "Use this when sending emails on their behalf or when filtering sent/received mail."
+        )
         context_section = (
             "\n\n── CONTEXT FROM PREVIOUS SESSIONS ─────────────────────────────\n"
             + prior_context
             if prior_context else ""
         )
-        full_instructions = base + context_section
+        full_instructions = base + user_section + context_section
         super().__init__(instructions=full_instructions)
 
     # ── search_emails ─────────────────────────────────────────────────────────
@@ -53,24 +59,28 @@ class Assistant(Agent):
         context: RunContext,
         query: str,
         sender: Optional[str] = None,
+        to: Optional[list[str]] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
     ) -> str:
-        """Search the email inbox by topic or keyword. Returns matching emails with subject, sender, date, and a preview.
-        Use this whenever the user wants to find emails about a subject, thread, or event.
-        For best results: put the topic or subject matter in 'query' and use the optional filters to narrow results.
-        If you need to filter by a specific sender but only have their name, call get_graph_context first to get their email address.
+        """Use this to find emails by topic, keyword, or any combination of filters. Returns matching emails with subject, sender, date, and a preview.
+        If you only have a person's name (not their email address), call search_entities first to resolve it.
+        If searching for emails sent by the user, use the user's email address as the sender filter.
+        If searching for emails received from a specific person, use search_entities first to find their email address, then pass it here as the sender filter.
+        If searching for emails sent to one or more persons, use search_entities first to find their email addresses, then pass them here in the 'to' list.
+        
 
         Args:
             query: The topic, subject, or keywords to search for, e.g. 'Q2 roadmap', 'invoice approval', 'flight booking', 'project kickoff'.
-            sender: Filter to emails from this exact email address. Use get_graph_context to resolve a name to an address first.
+            sender: Filter to emails from this exact email address. Use search_entities to resolve a name to an address first.
+            to: Filter to list of emails sent to any of these email addresses. Use search_entities to resolve names to addresses first.
             date_from: Only return emails on or after this ISO date, e.g. '2026-04-01'.
             date_to: Only return emails on or before this ISO date, e.g. '2026-04-30'.
         """
         from tools.agent_tools import search_emails as _fn
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(
-            None, lambda: _fn(query, sender=sender, date_from=date_from, date_to=date_to)
+            None, lambda: _fn(query, sender=sender, to=to, date_from=date_from, date_to=date_to)
         )
         if not results:
             return "No emails found matching that search."
@@ -92,7 +102,7 @@ class Assistant(Agent):
         context: RunContext,
         email_id: str,
     ) -> str:
-        """Read a specific email in full. Use this after search_emails when you need the complete message body, not just the preview.
+        """Read a specific email in full. Use this after search_emails when you need the complete message body, not just the preview. Do not call this to answer general questions, only when the user explicitly wants to read the full content of a specific email.
 
         Args:
             email_id: The email ID from a search_emails result.
@@ -111,28 +121,28 @@ class Assistant(Agent):
             f"{email['body'] or '(empty body)'}"
         )
 
-    # ── search_memory ─────────────────────────────────────────────────────────
+    # ── search_events ─────────────────────────────────────────────────────────
 
     @function_tool()
-    async def search_memory(
+    async def search_events(
         self,
         context: RunContext,
         query: str,
         session_id: Optional[str] = None,
+        entity_name: Optional[list[str]] = None,
     ) -> str:
-        """Semantic search over things that happened or were said in past voice sessions.
-        Use this when the user references something from memory — a preference they stated, a decision made, a topic discussed, or something they told you before.
-        Returns events with their descriptions, timestamps, and associated entities.
+        """Semantic search over events from past voice sessions. Used for things like preferences stated, decisions made, actions taken, commitments, specific occurrences. Each result includes a session_id you can pass to get_session_transcript for the full conversation.
 
         Args:
-            query: What you are trying to recall, described in natural language, e.g. 'user prefers morning meetings', 'decided to postpone hiring', 'discussed the Denver office'.
+            query: What you are trying to recall, e.g. 'user prefers morning meetings', 'agreed to send proposal by Friday', 'sent email to Jake'.
             session_id: Restrict search to a specific session ID. Omit to search across all sessions.
+            entity_name: Restrict results to events involving these entities, e.g. ['Sarah Chen', 'Acme Corp']. List uses AND logic so every listed name must appear.
         """
         from tools.agent_tools import search_events as _fn
         loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(None, lambda: _fn(query, session_id=session_id))
+        results = await loop.run_in_executor(None, lambda: _fn(query, session_id=session_id, entity_names=entity_name))
         if not results:
-            return "No relevant memory found for that query."
+            return "No relevant events found for that query."
         lines = []
         for r in results[:5]:
             lines.append(
@@ -142,24 +152,25 @@ class Assistant(Agent):
             )
         return "\n".join(lines)
 
-    # ── get_graph_context ─────────────────────────────────────────────────────
+    # ── search_entities ──────────────────────────────────────────────────────
 
     @function_tool()
-    async def get_graph_context(
+    async def search_entities(
         self,
         context: RunContext,
         query: str,
+        with_relationships: bool = False,
     ) -> str:
-        """Look up a person, company, or any named entity in the knowledge graph.
-        Returns their known properties (including email address), aliases, and relationships to other entities.
-        Use this whenever you need structured facts about an entity — who they are, how to contact them, what company they work at, who they report to, what projects they are involved in.
+        """Semantic search for a person, company, or named entity in the knowledge graph. Returns properties (including email address), aliases, facts about the person, and optionally relationships.
+        Use this when you need contact details or background on an entity, or to resolve a name to its exact full name form before calling get_entity. Also use this to get someone's email address before passing it to search_emails.
 
         Args:
-            query: The name or description of the entity to look up, e.g. 'Sarah Chen', 'Acme Corp', 'the project manager', 'GlobalTech'.
+            query: The name or natural-language description of the entity, e.g. 'Sarah' (to get full name Sarah Chen), 'Acme Corp', 'the project manager'.
+            with_relationships: If True, also return all directly connected nodes and their relationship types. Defaults to False.
         """
-        from tools.agent_tools import search_graph as _fn
+        from tools.agent_tools import search_entities as _fn
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: _fn(query))
+        result = await loop.run_in_executor(None, lambda: _fn(query, with_relationships=with_relationships))
         if not result:
             return f"No graph entry found matching '{query}'."
         n = result["node"]
@@ -171,43 +182,50 @@ class Assistant(Agent):
         for k, v in n["properties"].items():
             if k not in ("event_ids", "session_ids", "email_ids"):
                 lines.append(f"{k}: {v}")
-        if result["connected"]:
+        if with_relationships and result.get("connected"):
             lines.append("Relationships:")
             for c in result["connected"]:
                 arrow = f"--[{c['type']}]-->" if c["direction"] == "outgoing" else f"<--[{c['type']}]--"
                 lines.append(f"  {n['name']} {arrow} {c['node']['name']} ({c['node']['type']})")
         return "\n".join(lines)
 
-    # ── event_lookup ──────────────────────────────────────────────────────────
+    # ── get_entity ────────────────────────────────────────────────────────────
 
     @function_tool()
-    async def event_lookup(
+    async def get_entity(
         self,
         context: RunContext,
-        query: str,
-        entity_name: Optional[str] = None,
+        name: str,
+        with_relationships: bool = False,
     ) -> str:
-        """Search for specific events or decisions logged from past voice sessions.
-        Use this when you need a precise event — an action taken, a commitment made, a specific moment in a past session.
-        Complements search_memory; prefer event_lookup when looking for a concrete occurrence rather than a general topic.
+        """Fetch a graph node by its exact full name. Faster and more precise than search_entities when you already know the exact name.
+        Always call search_entities first to discover the correct full name, never guess or infer the name yourself. Even if you already have
+        a full name that you did not get from search_entities, call search_entities anyway to confirm it and get the canonical name as stored in the graph. 
+        You can also use with_relationships=True to get the directly connected nodes and their relationship types, for example to see who a person reports to or what emails are connected to an entity.
 
         Args:
-            query: Description of the event to find, e.g. 'agreed to send proposal by Friday', 'mentioned salary expectations', 'flagged the AWS cost issue'.
-            entity_name: Restrict results to events involving this entity, e.g. 'James Powell' or 'Acme Corp'.
+            name: The exact full name of the node as returned by a previous search_entities call, e.g. 'Sarah Chen'.
+            with_relationships: If True, also return all directly connected nodes and relationship types. Defaults to False.
         """
-        from tools.agent_tools import search_events as _fn
+        from tools.agent_tools import get_entity as _fn
         loop = asyncio.get_event_loop()
-        entity_names = [entity_name] if entity_name else None
-        results = await loop.run_in_executor(None, lambda: _fn(query, entity_names=entity_names))
-        if not results:
-            return "No matching events found."
-        lines = []
-        for r in results[:5]:
-            lines.append(
-                f"[{r['score']:.2f}] {r['description']}"
-                f" (at {r['timestamp'] or '-'}, session: {r['session_id'] or 'unknown'},"
-                f" entities: {', '.join(r['entity_names']) or '-'}, point_id: {r['point_id']})"
-            )
+        result = await loop.run_in_executor(None, lambda: _fn(name, with_relationships=with_relationships))
+        if not result:
+            return f"No graph node found with name '{name}'. Use search_entities to search for the correct full name first."
+        n = result["node"]
+        lines = [
+            f"[{n['type']}] {n['name']}",
+            f"Info: {n['info'] or '(none)'}",
+            f"Aliases: {', '.join(n['aliases']) or 'none'}",
+        ]
+        for k, v in n["properties"].items():
+            if k not in ("event_ids", "session_ids", "email_ids"):
+                lines.append(f"{k}: {v}")
+        if with_relationships and result.get("connected"):
+            lines.append("Relationships:")
+            for c in result["connected"]:
+                arrow = f"--[{c['type']}]-->" if c["direction"] == "outgoing" else f"<--[{c['type']}]--"
+                lines.append(f"  {n['name']} {arrow} {c['node']['name']} ({c['node']['type']})")
         return "\n".join(lines)
 
     # ── send_email ────────────────────────────────────────────────────────────
@@ -216,14 +234,14 @@ class Assistant(Agent):
     async def send_email(
         self,
         context: RunContext,
-        to: str,
+        to: list[str],
         subject: str,
         body: str,
     ) -> str:
-        """Send an email on behalf of the user. Always read the full draft aloud and get explicit confirmation before calling this.
+        """Send an email on behalf of the user. Always compose the full draft, read it back word-for-word, and get explicit verbal confirmation before calling this. Use search_entities to look up the recipient's email address if you only have their name.
 
         Args:
-            to: Recipient email address.
+            to: List of recipient email addresses.
             subject: Email subject line.
             body: Full plain-text email body.
         """
@@ -249,8 +267,9 @@ class Assistant(Agent):
 
         loop = asyncio.get_event_loop()
         email_id = await loop.run_in_executor(None, _send)
-        logger.info(f"send_email: to={to} subject={subject!r} id={email_id}")
-        return f'Email sent to {to} with subject "{subject}". Saved with ID {email_id}.'
+        to_str = ", ".join(to)
+        logger.info(f"send_email: to={to_str} subject={subject!r} id={email_id}")
+        return f'Email sent to {to_str} with subject "{subject}". Saved with ID {email_id}.'
 
     # ── get_session_transcript ────────────────────────────────────────────────
 
@@ -260,12 +279,10 @@ class Assistant(Agent):
         context: RunContext,
         session_id: str,
     ) -> str:
-        """Retrieve the full transcript of a specific past voice session.
-        Use this when a search_memory or event_lookup result references a session_id and you need
-        the complete conversation from that session for deeper context.
+        """Retrieve the full transcript of a specific past voice session. Only call this when you have a session_id from a search_events result and the user needs more detail than the summary provides.
 
         Args:
-            session_id: The session ID returned by search_memory or event_lookup, e.g. 'session_1745123456789'.
+            session_id: The session ID returned by search_events, e.g. 'session_1745123456789'.
         """
         from tools.agent_tools import get_session_transcript as _fn
         loop = asyncio.get_event_loop()
@@ -287,7 +304,8 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+    if os.environ.get("VOICE_ENABLED", "false").lower() == "true":
+        proc.userdata["vad"] = silero.VAD.load()
 
 
 server.setup_fnc = prewarm
@@ -303,15 +321,23 @@ async def email_assistant(ctx: JobContext):
     if prior_context:
         logger.info("loaded prior context (%d chars)\n%s", len(prior_context), prior_context)
 
+    voice_enabled = os.environ.get("VOICE_ENABLED", "false").lower() == "true"
+
     session = AgentSession(
-        stt=inference.STT(model="deepgram/nova-3", language="multi"),
-        llm=inference.LLM(model=AGENT_MODEL),
-        tts=inference.TTS(model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"),
-        vad=ctx.proc.userdata["vad"],
+        # ── Voice (set VOICE_ENABLED=true to activate) ────────────────────────
+        # stt=inference.STT(model="deepgram/nova-3", language="multi"),
+        # tts=inference.TTS(model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"),
+        stt=openai.STT(model="whisper-1") if voice_enabled else None,
+        llm=openai.LLM(model=AGENT_MODEL),
+        tts=openai.TTS(model="tts-1", voice="alloy") if voice_enabled else None,
+        vad=ctx.proc.userdata.get("vad") if voice_enabled else None,
         preemptive_generation=True,
     )
 
     await ctx.connect()
+
+    if not voice_enabled:
+        session.output.set_audio_enabled(False)
 
     await session.start(
         agent=Assistant(prior_context=prior_context),

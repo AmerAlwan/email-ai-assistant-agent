@@ -4,7 +4,7 @@ agent_tools.py — search and retrieval tools for the voice agent.
 Run directly to test any tool:
     uv run python tools/agent_tools.py search_emails
     uv run python tools/agent_tools.py search_events
-    uv run python tools/agent_tools.py search_graph
+    uv run python tools/agent_tools.py search_entities
     uv run python tools/agent_tools.py get_email
     uv run python tools/agent_tools.py get_event
 """
@@ -86,8 +86,7 @@ def search_emails(
     query: str,
     *,
     sender: str | None = None,
-    to: str | None = None,
-    thread_id: str | None = None,
+    to: list[str] | str | None = None,
     labels: list[str] | str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
@@ -107,13 +106,13 @@ def search_emails(
         labels = [labels]
     if labels:
         labels = [l.lower() for l in labels]
+    if isinstance(to, str):
+        to = [to]
     must: list[FieldCondition] = []
     if sender:
         must.append(FieldCondition(key="sender", match=MatchValue(value=sender)))
     if to:
-        must.append(FieldCondition(key="to", match=MatchAny(any=[to])))
-    if thread_id:
-        must.append(FieldCondition(key="thread_id", match=MatchValue(value=thread_id)))
+        must.append(FieldCondition(key="to", match=MatchAny(any=to)))
     if labels:
         must.append(FieldCondition(key="labels", match=MatchAny(any=labels)))
     if date_from:
@@ -203,13 +202,14 @@ def search_events(
         for h in hits
     ]
 
-# ── search_graph ──────────────────────────────────────────────────────────────
+# ── search_entities ─────────────────────────────────────────────────────────
 
-def search_graph(query: str) -> dict | None:
+def search_entities(query: str, with_relationships: bool = False) -> dict | None:
     """
     Semantic graph search:
       1. Embed the query, find the best-matching entity in Qdrant.
-      2. Return that node + all directly connected nodes with relationship metadata.
+      2. Return that node. If with_relationships=True, also return all directly
+         connected nodes with relationship metadata.
     Returns None if no match or collection doesn't exist.
     """
     qdrant = _get_qdrant()
@@ -231,18 +231,25 @@ def search_graph(query: str) -> dict | None:
     driver = _get_neo4j()
     try:
         with driver.session() as session:
-            result = session.run(
-                """
-                MATCH (n {name: $name})
-                OPTIONAL MATCH (n)-[r_out]->(nb_out)
-                OPTIONAL MATCH (n)<-[r_in]-(nb_in)
-                RETURN
-                  n,
-                  collect(DISTINCT {rel: r_out, node: nb_out}) AS outgoing,
-                  collect(DISTINCT {rel: r_in,  node: nb_in})  AS incoming
-                """,
-                name=matched_name,
-            )
+            if with_relationships:
+                result = session.run(
+                    """
+                    MATCH (n {name: $name})
+                    OPTIONAL MATCH (n)-[r_out]->(nb_out)
+                    OPTIONAL MATCH (n)<-[r_in]-(nb_in)
+                    RETURN
+                      n,
+                      collect(DISTINCT {rel: r_out, node: nb_out}) AS outgoing,
+                      collect(DISTINCT {rel: r_in,  node: nb_in})  AS incoming
+                    """,
+                    name=matched_name,
+                )
+            else:
+                result = session.run(
+                    "MATCH (n {name: $name}) RETURN n, [] AS outgoing, [] AS incoming",
+                    name=matched_name,
+                )
+
             records = list(result)
             if not records:
                 return None
@@ -283,6 +290,80 @@ def search_graph(query: str) -> dict | None:
                 "match_score": hit.score,
                 "node":        to_node(raw_node),
                 "connected":   connected,
+            }
+    finally:
+        driver.close()
+
+# ── get_entity ──────────────────────────────────────────────────────────────
+
+def get_entity(name: str, with_relationships: bool = False) -> dict | None:
+    """
+    Fetch a graph node by its exact canonical name from Neo4j.
+    If with_relationships=True, also returns all directly connected nodes.
+    Returns None if not found.
+    Use search_entities first to discover the correct canonical name.
+    """
+    driver = _get_neo4j()
+    try:
+        with driver.session() as session:
+            if with_relationships:
+                result = session.run(
+                    """
+                    MATCH (n {name: $name})
+                    OPTIONAL MATCH (n)-[r_out]->(nb_out)
+                    OPTIONAL MATCH (n)<-[r_in]-(nb_in)
+                    RETURN
+                      n,
+                      collect(DISTINCT {rel: r_out, node: nb_out}) AS outgoing,
+                      collect(DISTINCT {rel: r_in,  node: nb_in})  AS incoming
+                    """,
+                    name=name,
+                )
+            else:
+                result = session.run(
+                    "MATCH (n {name: $name}) RETURN n, [] AS outgoing, [] AS incoming",
+                    name=name,
+                )
+
+            records = list(result)
+            if not records:
+                return None
+
+            rec = records[0]
+            raw_node = rec["n"]
+
+            def to_node(n) -> dict:
+                p = dict(n.items())
+                extra = {k: v for k, v in p.items() if k not in ("name", "info", "aliases")}
+                return {
+                    "name":       p.get("name", ""),
+                    "type":       list(n.labels)[0] if n.labels else "Entity",
+                    "info":       p.get("info", ""),
+                    "aliases":    p.get("aliases") or [],
+                    "properties": extra,
+                }
+
+            connected = []
+            for entry in rec["outgoing"]:
+                if entry["node"] is None:
+                    continue
+                connected.append({
+                    "direction": "outgoing",
+                    "type":      entry["rel"].type,
+                    "node":      to_node(entry["node"]),
+                })
+            for entry in rec["incoming"]:
+                if entry["node"] is None:
+                    continue
+                connected.append({
+                    "direction": "incoming",
+                    "type":      entry["rel"].type,
+                    "node":      to_node(entry["node"]),
+                })
+
+            return {
+                "node":      to_node(raw_node),
+                "connected": connected,
             }
     finally:
         driver.close()
@@ -477,16 +558,16 @@ if __name__ == "__main__":
             print(f"    point_id : {r['point_id']}")
             print()
 
-    elif tool == "search_graph":
+    elif tool == "search_entities":
         # ── Edit these ──────────────────────────────────────────────────
         query = "Sarah"
         # ────────────────────────────────────────────────────────────────
-        result = search_graph(query)
+        result = search_entities(query)
         if not result:
             print("No matching node found.")
         else:
             n = result["node"]
-            print(f"[search_graph] Match [{result['match_score']:.4f}]: [{n['type']}] {n['name']}")
+            print(f"[search_entities] Match [{result['match_score']:.4f}]: [{n['type']}] {n['name']}")
             print(f"  Info    : {n['info'] or '-'}")
             print(f"  Aliases : {', '.join(n['aliases']) or '-'}")
             if n["properties"]:
@@ -532,5 +613,5 @@ if __name__ == "__main__":
 
     else:
         print("Usage: uv run python tools/agent_tools.py <tool>")
-        print("Tools: search_emails | search_events | search_graph | get_email | get_event")
+        print("Tools: search_emails | search_events | search_entities | get_email | get_event")
         sys.exit(1)
