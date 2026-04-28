@@ -67,13 +67,12 @@ class Assistant(Agent):
         If you only have a person's name (not their email address), call search_entities first to resolve it.
         If searching for emails sent by the user, use the user's email address as the sender filter.
         If searching for emails received from a specific person, use search_entities first to find their email address, then pass it here as the sender filter.
-        If searching for emails sent to one or more persons, use search_entities first to find their email addresses, then pass them here in the 'to' list.
-        
+        If searching for emails sent to one or more persons, use search_entities first to find their email addresses, then pass them here in the 'to' list.        
 
         Args:
             query: The topic, subject, or keywords to search for, e.g. 'Q2 roadmap', 'invoice approval', 'flight booking', 'project kickoff'.
             sender: Filter to emails from this exact email address. Use search_entities to resolve a name to an address first.
-            to: Filter to list of emails sent to any of these email addresses. Use search_entities to resolve names to addresses first.
+            to: Filter to list of emails sent to any of these email addresses. This field must be an email address. Use search_entities to get the email addresses from names first.
             date_from: Only return emails on or after this ISO date, e.g. '2026-04-01'.
             date_to: Only return emails on or before this ISO date, e.g. '2026-04-30'.
         """
