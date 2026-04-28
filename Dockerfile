@@ -31,7 +31,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # production builds or the very first boot before the mount is active.
 COPY . .
 
+RUN chmod +x /app/start.sh
+
 EXPOSE 8000
 
-# --reload watches /app for changes; hot-reloads Python on every file save.
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Start both the FastAPI HTTP server and the LiveKit agent worker.
+CMD ["/app/start.sh"]
