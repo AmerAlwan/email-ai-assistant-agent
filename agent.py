@@ -26,7 +26,7 @@ logger = logging.getLogger("agent")
 # In Docker the vars come from env_file in compose; locally .env is a fallback.
 load_dotenv()
 
-AGENT_MODEL = "gpt-4o-mini"
+AGENT_MODEL = "openai/gpt-5.3-chat-latest"
 
 
 def _load_base_instructions() -> str:
@@ -357,11 +357,10 @@ async def email_assistant(ctx: JobContext):
 
     session = AgentSession(
         # ── Voice (set VOICE_ENABLED=true to activate) ────────────────────────
-        # stt=inference.STT(model="deepgram/nova-3", language="multi"),
-        # tts=inference.TTS(model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"),
-        stt=openai.STT(model="whisper-1") if voice_enabled else None,
-        llm=openai.LLM(model=AGENT_MODEL),
-        tts=openai.TTS(model="tts-1", voice="alloy") if voice_enabled else None,
+        stt=inference.STT(model="deepgram/nova-3", language="multi") if voice_enabled else None,
+        # llm=openai.LLM(model=AGENT_MODEL),
+        llm=inference.LLM(model=AGENT_MODEL),
+        tts=inference.TTS(model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc") if voice_enabled else None,
         vad=ctx.proc.userdata.get("vad") if voice_enabled else None,
         preemptive_generation=True,
     )
