@@ -1,0 +1,38 @@
+[project]
+name = "email-agent"
+version = "0.0.1"
+requires-python = ">=3.12"
+dependencies = [
+    # Web framework + server
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+
+    # LiveKit voice agent (version as specified in design doc)
+    "livekit-agents==1.5.6",
+    "livekit-plugins-openai>=0.10.0",
+    "livekit-plugins-silero>=0.7.0",
+    "livekit-plugins-turn-detector>=0.5.0",
+
+    # LLM providers
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+
+    # Databases
+    "asyncpg>=0.30.0",               # PostgreSQL async driver
+    "psycopg2-binary>=2.9.0",        # PostgreSQL sync driver (ingestion scripts)
+    "redis[hiredis]>=5.2.0",         # Redis with fast C parser
+    "neo4j>=5.26.0",                 # Neo4j Bolt driver
+    "qdrant-client[async]>=1.12.0",  # Qdrant vector DB
+
+    # Config / validation
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "python-dotenv>=1.0.0",
+
+    # Utilities
+    "httpx>=0.28.0",
+    "python-multipart>=0.0.9",       # FastAPI file/form uploads
+]
+
+[tool.uv]
+# Run `uv lock` locally to generate uv.lock, then commit it for reproducible builds.
