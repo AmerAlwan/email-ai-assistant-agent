@@ -58,44 +58,44 @@ class Assistant(Agent):
         self,
         context: RunContext,
         query: str,
-        sender: Optional[str] = None,
-        to: Optional[list[str]] = None,
+        from_email: Optional[str] = None,
+        to_emails: Optional[list[str]] = None,
         date_from: Optional[str] = None,
         date_to: Optional[str] = None,
     ) -> str:
         """Use this to find emails by topic, keyword, or any combination of filters. Returns matching emails with subject, sender, date, and a preview.
         If you only have a person's name (not their email address), call search_entities first to resolve it.
-        If searching for emails sent by the user, use the user's email address as the sender filter.
-        If searching for emails received from a specific person, use search_entities first to find their email address, then pass it here as the sender filter.
-        If searching for emails sent to one or more persons, use search_entities first to find their email addresses, then pass them here in the 'to' list.        
+        If searching for emails sent by the user, use the user's email address in the 'from_email' parameter.
+        If searching for emails received from a specific person, use search_entities first to find their email address, then pass it into the 'from_email' parameter.
+        If searching for emails sent to one or more persons, use search_entities first to find their email addresses, then pass them in a list into the 'to_emails' parameter.
 
         Args:
             query: The topic, subject, or keywords to search for, e.g. 'Q2 roadmap', 'invoice approval', 'flight booking', 'project kickoff'.
-            sender: Filter to emails from this exact email address. Use search_entities to resolve a name to an address first.
-            to: Filter to list of emails sent to any of these email addresses. This field must be an email address. Use search_entities to get the email addresses from names first.
+            from_email: Filter to emails from this exact email address. Use search_entities to resolve a name to an address first.
+            to_emails: Filter to list of emails sent to any of these email addresses. Must be email addresses, never names. Use search_entities to resolve names first.
             date_from: Only return emails on or after this ISO date, e.g. '2026-04-01'.
             date_to: Only return emails on or before this ISO date, e.g. '2026-04-30'.
         """
-        # Hard-validate that every value in `to` is an email address, not a name.
-        if to:
-            bad = [v for v in to if "@" not in v]
+        # Hard-validate that every value in `to_emails` is an email address, not a name.
+        if to_emails:
+            bad = [v for v in to_emails if "@" not in v]
             if bad:
                 raise ToolError(
-                    f"The 'to' filter requires email addresses, but you passed: {bad}. "
+                    f"The 'to_emails' filter requires email addresses, but you passed: {bad}. "
                     "Call search_entities first to resolve each name to their email address, "
                     "then retry search_emails with the resolved addresses."
                 )
-        # Same guard for sender.
-        if sender and "@" not in sender:
+        # Same guard for from_email.
+        if from_email and "@" not in from_email:
             raise ToolError(
-                f"The 'sender' filter requires an email address, but you passed: {sender!r}. "
+                f"The 'from_email' filter requires an email address, but you passed: {from_email!r}. "
                 "Call search_entities first to resolve the name to an email address, "
                 "then retry search_emails with the resolved address."
             )
         from tools.agent_tools import search_emails as _fn
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(
-            None, lambda: _fn(query, sender=sender, to=to, date_from=date_from, date_to=date_to)
+            None, lambda: _fn(query, sender=from_email, to=to_emails, date_from=date_from, date_to=date_to)
         )
         if not results:
             return "No emails found matching that search."
